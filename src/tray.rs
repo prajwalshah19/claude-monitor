@@ -14,7 +14,6 @@ pub struct TrayState {
 }
 
 impl TrayState {
-    /// Returns true if the menu was rebuilt.
     pub fn rebuild_if_changed(&mut self, sessions: &[ClaudeSession], config: &Config) -> bool {
         let hash = session_hash(sessions);
         if hash == self.session_hash {
@@ -27,9 +26,12 @@ impl TrayState {
         self.quit_id = quit_id;
         self.kill_actions = kill_actions;
 
-        // Update title
         let total = monitor::total_ram_bytes(sessions);
-        let title = format!("CC: {}", monitor::format_bytes(total));
+        let title = if sessions.is_empty() {
+            "CC".to_string()
+        } else {
+            format!("CC {}", monitor::format_bytes(total))
+        };
         self.tray.set_title(Some(&title));
 
         true
@@ -42,7 +44,7 @@ pub fn create_tray(config: &Config) -> TrayState {
 
     let tray = TrayIconBuilder::new()
         .with_icon(icon)
-        .with_title("CC: 0M")
+        .with_title("CC")
         .with_menu(Box::new(menu))
         .build()
         .expect("Failed to create tray icon");
@@ -63,69 +65,54 @@ fn build_menu(
     let mut kill_actions = HashMap::new();
 
     let total_ram = monitor::total_ram_bytes(sessions);
+    let threshold_bytes = (config.ram_threshold_gb * 1024.0 * 1024.0 * 1024.0) as u64;
 
-    // Header
-    let header = MenuItem::new(
+    // Summary header
+    let status = if total_ram > threshold_bytes {
         format!(
-            "Total: {}  ·  {} sessions",
+            "!! {} / {}G limit  ({} sessions)",
             monitor::format_bytes(total_ram),
+            config.ram_threshold_gb,
             sessions.len()
-        ),
-        false,
-        None,
-    );
+        )
+    } else {
+        format!(
+            "{} / {}G limit  ({} sessions)",
+            monitor::format_bytes(total_ram),
+            config.ram_threshold_gb,
+            sessions.len()
+        )
+    };
+    let header = MenuItem::new(status, false, None);
     menu.append(&header).unwrap();
-
-    let threshold = MenuItem::new(
-        format!("Threshold: {}G", config.ram_threshold_gb),
-        false,
-        None,
-    );
-    menu.append(&threshold).unwrap();
 
     menu.append(&PredefinedMenuItem::separator()).unwrap();
 
     if sessions.is_empty() {
-        let empty = MenuItem::new("No Claude sessions running", false, None);
+        let empty = MenuItem::new("No Claude sessions", false, None);
         menu.append(&empty).unwrap();
     } else {
-        for (i, session) in sessions.iter().enumerate() {
-            if i > 0 {
-                menu.append(&PredefinedMenuItem::separator()).unwrap();
-            }
-
-            // Project + RAM
+        for session in sessions {
             let ram_str = monitor::format_bytes(session.ram_bytes);
+
+            // Session info line
             let info = MenuItem::new(
-                format!("{}    {}", session.project, ram_str),
+                format!(
+                    "{} — {}   (PID {} · {} · CPU {:.0}%)",
+                    session.project,
+                    ram_str,
+                    session.pid,
+                    session.age_string(),
+                    session.cpu_percent,
+                ),
                 false,
                 None,
             );
             menu.append(&info).unwrap();
 
-            // PID, age, CPU
-            let details = MenuItem::new(
-                format!(
-                    "  PID {} · {} · CPU {:.1}%",
-                    session.pid,
-                    session.age_string(),
-                    session.cpu_percent
-                ),
-                false,
-                None,
-            );
-            menu.append(&details).unwrap();
-
-            // Flags (if any)
-            if !session.flags.is_empty() {
-                let flags =
-                    MenuItem::new(format!("  {}", session.flags), false, None);
-                menu.append(&flags).unwrap();
-            }
-
             // Kill button
             let kill = MenuItem::new(
-                format!("  Kill {} (PID {})", session.project, session.pid),
+                format!("    Kill {}", session.project),
                 true,
                 None,
             );

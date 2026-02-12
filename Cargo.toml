@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.29"
 tray-icon = "0.17"
+tao = "0.30"
 sysinfo = "0.32"
 libproc = "0.14"
 mac-notification-sys = "0.6"

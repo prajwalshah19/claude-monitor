@@ -1,1 +1,1 @@
-// Unused — all UI is in the native tray menu (tray.rs)
+// This module is no longer used - the app uses native tray menus only.

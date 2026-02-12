@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use eframe::egui;
+
+use libproc::pid_rusage::{pidrusage, RUsageInfoV2};
 use sysinfo::System;
 
 #[derive(Debug, Clone)]
@@ -12,7 +13,6 @@ pub struct ClaudeSession {
     pub ram_bytes: u64,
     pub cpu_percent: f32,
     pub started: SystemTime,
-    pub flags: String,
 }
 
 impl ClaudeSession {
@@ -21,8 +21,7 @@ impl ClaudeSession {
     }
 
     pub fn age_string(&self) -> String {
-        let elapsed = self.started.elapsed().unwrap_or_default();
-        let secs = elapsed.as_secs();
+        let secs = self.started.elapsed().unwrap_or_default().as_secs();
         if secs < 60 {
             format!("{}s", secs)
         } else if secs < 3600 {
@@ -37,11 +36,7 @@ impl ClaudeSession {
 
 pub type SharedSessions = Arc<Mutex<Vec<ClaudeSession>>>;
 
-pub fn start_monitor(
-    sessions: SharedSessions,
-    poll_interval: Duration,
-    ctx: egui::Context,
-) {
+pub fn start_monitor(sessions: SharedSessions, poll_interval: Duration) {
     std::thread::spawn(move || {
         let mut sys = System::new();
         loop {
@@ -61,29 +56,21 @@ pub fn start_monitor(
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
 
-                let cmd: Vec<String> = process
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .collect();
-                let flags = cmd
-                    .iter()
-                    .filter(|a| a.starts_with('-'))
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
                 let started =
                     SystemTime::UNIX_EPOCH + Duration::from_secs(process.start_time());
+
+                // Use phys_footprint (matches Activity Monitor) instead of RSS
+                let ram_bytes = pidrusage::<RUsageInfoV2>(pid_u32 as i32)
+                    .map(|info| info.ri_phys_footprint)
+                    .unwrap_or(process.memory());
 
                 found.push(ClaudeSession {
                     pid: pid_u32,
                     project,
                     cwd,
-                    ram_bytes: process.memory(),
+                    ram_bytes,
                     cpu_percent: process.cpu_usage(),
                     started,
-                    flags,
                 });
             }
 
@@ -93,7 +80,6 @@ pub fn start_monitor(
                 *lock = found;
             }
 
-            ctx.request_repaint();
             std::thread::sleep(poll_interval);
         }
     });
@@ -104,8 +90,6 @@ fn is_claude_process(process: &sysinfo::Process) -> bool {
     if name == "claude" {
         return true;
     }
-
-    // Check executable path
     if let Some(exe) = process.exe() {
         if let Some(exe_name) = exe.file_name() {
             if exe_name.to_string_lossy() == "claude" {
@@ -113,32 +97,54 @@ fn is_claude_process(process: &sysinfo::Process) -> bool {
             }
         }
     }
-
     false
 }
 
 fn get_cwd(pid: u32) -> PathBuf {
-    // Try libproc first
-    if let Ok(path) = libproc::proc_pid::pidcwd(pid as i32) {
-        return path;
+    // Try the process itself first
+    if let Some(path) = get_pid_cwd(pid) {
+        if path != PathBuf::from("/") {
+            return path;
+        }
     }
+    // Claude's own CWD is often "/", so check parent shell's CWD
+    if let Some(ppid) = get_ppid(pid) {
+        if let Some(path) = get_pid_cwd(ppid) {
+            if path != PathBuf::from("/") {
+                return path;
+            }
+        }
+    }
+    PathBuf::from("unknown")
+}
 
-    // Fallback: lsof
+fn get_ppid(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim().parse().ok()
+}
+
+fn get_pid_cwd(pid: u32) -> Option<PathBuf> {
+    if let Ok(path) = libproc::proc_pid::pidcwd(pid as i32) {
+        return Some(path);
+    }
     if let Ok(output) = std::process::Command::new("lsof")
-        .args(["-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             if let Some(path) = line.strip_prefix('n') {
-                if !path.is_empty() {
-                    return PathBuf::from(path);
+                if !path.is_empty() && path != "/" {
+                    return Some(PathBuf::from(path));
                 }
             }
         }
     }
-
-    PathBuf::from("unknown")
+    None
 }
 
 pub fn total_ram_bytes(sessions: &[ClaudeSession]) -> u64 {
